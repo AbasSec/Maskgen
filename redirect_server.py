@@ -43,8 +43,6 @@ def run_server(host: str = "127.0.0.1", port: int = 5000):
         port=port,
         debug=False,
         use_reloader=False,
-        # Redirect Werkzeug's stdout/stderr to /dev/null — kills 400 log spam
-        log_output=False,
     )
 
 
