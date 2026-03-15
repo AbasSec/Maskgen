@@ -5,13 +5,22 @@ and issues HTTP 302 redirects to the stored target URL.
 """
 
 import logging
+import os
 from flask import Flask, redirect
 import database
 
-# Suppress Flask/Werkzeug request logs — MASKGEN handles its own output
-logging.getLogger("werkzeug").setLevel(logging.ERROR)
+# --- Silence ALL Flask / Werkzeug output so nothing bleeds into the CLI ---
+# Level CRITICAL means only fatal internal errors surface (practically nothing)
+logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
+logging.getLogger("werkzeug").propagate = False
+
+_devnull = open(os.devnull, "w")
 
 app = Flask(__name__)
+
+# Silence Flask's own internal logger too
+app.logger.setLevel(logging.CRITICAL)
+app.logger.propagate = False
 
 
 @app.route("/<code>")
@@ -29,7 +38,14 @@ def handle_redirect(code: str):
 
 def run_server(host: str = "127.0.0.1", port: int = 5000):
     """Start the Flask server. Called from maskgen.py in a daemon thread."""
-    app.run(host=host, port=port, debug=False, use_reloader=False)
+    app.run(
+        host=host,
+        port=port,
+        debug=False,
+        use_reloader=False,
+        # Redirect Werkzeug's stdout/stderr to /dev/null — kills 400 log spam
+        log_output=False,
+    )
 
 
 if __name__ == "__main__":
