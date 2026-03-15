@@ -10,6 +10,8 @@ Usage:
 
 import os
 import sys
+import time
+import socket
 import argparse
 import threading
 
@@ -59,7 +61,7 @@ def display_help():
     Prepend a trusted domain to conceal the real redirect target.
 
 {C}URI ANATOMY:{W}
-    https://[MASK_DOMAIN]@{HOST}:{PORT}/[CODE]
+    http://[MASK_DOMAIN]@{HOST}:{PORT}/[CODE]
               ───────────  ─────────────  ──────
               Userinfo     Real Host      Redirect Code
               (ignored)    (Flask server) (maps to target)
@@ -132,7 +134,7 @@ def create_masked_url():
         input("\n  Press Enter to continue...")
         return
 
-    masked_url = f"https://{mask}@{HOST}:{PORT}/{code}"
+    masked_url = f"http://{mask}@{HOST}:{PORT}/{code}"
 
     print(f"\n  {G}[+] Masked URL Generated:{W}")
     print(f"\n      {B}{masked_url}{W}\n")
@@ -267,6 +269,17 @@ def main():
     )
     server_thread.start()
 
+    # Wait until Flask is actually accepting connections (max 5 seconds)
+    for _ in range(50):
+        try:
+            with socket.create_connection((HOST, PORT), timeout=0.1):
+                break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        print(f"{R}[!] Warning: redirect server did not start in time. "
+              f"Links may not work immediately.{W}")
+
     while True:
         clear()
         choice = main_menu()
@@ -287,4 +300,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
