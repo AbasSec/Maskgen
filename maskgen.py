@@ -13,6 +13,7 @@ import threading
 import json
 import webbrowser
 import subprocess
+import re
 
 import database
 import redirect_server
@@ -31,8 +32,10 @@ def load_config():
     return {}
 
 def save_config(cfg):
+    current = load_config()
+    current.update(cfg)
     with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=4)
+        json.dump(current, f, indent=4)
 
 # --- CONFIGURATION DEFAULTS ---
 _cfg = load_config()
@@ -40,6 +43,7 @@ HOST = _cfg.get("host", "0.0.0.0")
 PORT = _cfg.get("port", 5000)
 LAN_IP = get_local_ip()
 PUBLIC_URL = _cfg.get("public_url", None)
+TUNNEL_PROC = None
 
 # --- ANSI COLOR HELPERS ---
 R  = "\033[1;31m"   # Bold Red
@@ -57,12 +61,12 @@ def copy_to_clipboard(text: str):
             # Try xclip first, then xsel
             for cmd in [['xclip', '-selection', 'clipboard'], ['xsel', '-ib']]:
                 try:
-                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     proc.communicate(input=text.encode('utf-8'))
                     if proc.returncode == 0: return True
                 except: continue
         
-        # Fallback to pyperclip if installed
+        # Fallback to pyperclip
         import pyperclip
         pyperclip.copy(text)
         return True
@@ -75,6 +79,34 @@ def open_url(url: str):
         webbrowser.open(url)
         return True
     except:
+        return False
+
+# --- AUTO TUNNEL HELPER ---
+def start_auto_tunnel():
+    """Starts a Serveo SSH tunnel in the background and captures the URL."""
+    global PUBLIC_URL, TUNNEL_PROC
+    print(f"  {Y}[*]{W} Initializing Global Tunnel (Serveo)...")
+    
+    # -o StrictHostKeyChecking=no avoids hanging on host verification
+    cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-R", f"80:localhost:{PORT}", "serveo.net"]
+    
+    try:
+        TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        
+        # We need to read the output to find the assigned URL
+        for _ in range(20): # Timeout after 20 lines/seconds
+            line = TUNNEL_PROC.stdout.readline()
+            if not line: break
+            
+            # Look for something like https://random.serveo.net
+            match = re.search(r"https://[a-zA-Z0-9.-]+serveo\.net", line)
+            if match:
+                PUBLIC_URL = match.group(0)
+                save_config({"public_url": PUBLIC_URL})
+                return True
+        return False
+    except Exception as e:
+        print(f"  {R}[!] SSH Error: {e}{W}")
         return False
 
 # ---------------------------------------------------------------------------
@@ -98,8 +130,10 @@ def banner():
     if not PUBLIC_URL:
         if ".23." in LAN_IP or ".17." in LAN_IP:
             print(f"    {R}[!] WSL2 IP detected ({LAN_IP}). Phone may not reach it.{W}")
+        else:
+            print(f"    {Y}[i] Local Mode (LAN only). Use Global Mode for external links.{W}")
     else:
-        print(f"    {G}[+] Tunnel Active: {PUBLIC_URL}{W}")
+        print(f"    {G}[+] Global Mode Active: {PUBLIC_URL}{W}")
     print()
 
 def display_help():
@@ -153,12 +187,13 @@ def manage_settings():
         raw = input(f"  {Y}New Port{W}: ").strip()
         if raw.isdigit(): PORT = int(raw)
     elif choice == "3":
-        PUBLIC_URL = input(f"  {Y}New Tunnel URL{W} (e.g. https://xyz.serveo.net): ").strip() or None
+        PUBLIC_URL = input(f"  {Y}New Tunnel URL{W} (or 'none'): ").strip()
+        if PUBLIC_URL.lower() == 'none': PUBLIC_URL = None
     else:
         return
 
     save_config({"host": HOST, "port": PORT, "public_url": PUBLIC_URL})
-    print(f"\n  {G}[+] Settings saved to {CONFIG_FILE}.{W}")
+    print(f"\n  {G}[+] Settings saved.{W}")
     input("  Press Enter to continue...")
 
 # ---------------------------------------------------------------------------
@@ -166,6 +201,7 @@ def manage_settings():
 # ---------------------------------------------------------------------------
 
 def create_masked_url():
+    global PUBLIC_URL
     clear()
     banner()
     print(f"{C}[ Create Masked URL ]{W}\n")
@@ -176,6 +212,15 @@ def create_masked_url():
         print(f"  {R}[!] Invalid URL (must start with http/https){W}")
 
     mask = input(f"  {Y}Mask Domain{W}: ").strip().replace("http://", "").replace("https://", "").rstrip("/") or "google.com"
+
+    # --- UX IMPROVEMENT: Auto-Global Option ---
+    if not PUBLIC_URL:
+        go_global = input(f"  {Y}Make this link Global (Works everywhere)?{W} [y/N]: ").strip().lower()
+        if go_global == 'y':
+            if not start_auto_tunnel():
+                print(f"  {R}[!] Failed to initialize tunnel. Falling back to LAN mode.{W}")
+            else:
+                print(f"  {G}[+] Global Mode Active: {PUBLIC_URL}{W}")
 
     # Generate unique code
     for _ in range(5):
@@ -239,7 +284,6 @@ def view_analytics():
         raw = input(f"\n  ID: ").strip().lower()
         if not raw: break
         
-        # Parse choice like "7c" or "7o"
         target_id = "".join(filter(str.isdigit, raw))
         if not target_id: continue
         
@@ -258,7 +302,7 @@ def view_analytics():
             open_url(link)
             print(f"  {G}[+] Opened ID {target_id}.{W}")
             time.sleep(1)
-        elif 'c' in raw or True: # Default to copy
+        elif 'c' in raw or True: 
             if copy_to_clipboard(link):
                 print(f"  {G}[+] Copied ID {target_id} to clipboard.{W}")
                 time.sleep(1)
@@ -299,7 +343,7 @@ def main():
     global PUBLIC_URL
     if args.url:
         PUBLIC_URL = args.url
-        save_config({"host": HOST, "port": PORT, "public_url": PUBLIC_URL})
+        save_config({"public_url": PUBLIC_URL})
 
     database.init_db()
 
@@ -318,14 +362,19 @@ def main():
                 break
         except: time.sleep(0.1)
 
-    while True:
-        clear()
-        choice = main_menu()
-        if choice == "1": create_masked_url()
-        elif choice == "2": view_analytics()
-        elif choice == "3": manage_settings()
-        elif choice == "4": delete_link()
-        elif choice == "5": break
+    try:
+        while True:
+            clear()
+            choice = main_menu()
+            if choice == "1": create_masked_url()
+            elif choice == "2": view_analytics()
+            elif choice == "3": manage_settings()
+            elif choice == "4": delete_link()
+            elif choice == "5": break
+    finally:
+        # Clean up tunnel on exit
+        if TUNNEL_PROC:
+            TUNNEL_PROC.terminate()
 
 if __name__ == "__main__":
     try: main()
