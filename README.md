@@ -324,5 +324,5 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 **MASKGEN** · Built for the security community · Use responsibly
 
 *"Know the attack to build the defense."*
-
+*"AbasSec · Professional Offensive Security"*
 </div>
