@@ -1,7 +1,5 @@
 """
 maskgen.py — MASKGEN core CLI.
-Starts the threaded Flask redirect server, manages URL generation,
-and renders the interactive analytics table.
 """
 
 import os
@@ -14,6 +12,9 @@ import json
 import webbrowser
 import subprocess
 import re
+import signal
+import select
+import logging
 
 import database
 import redirect_server
@@ -27,22 +28,26 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
-        except:
+        except Exception:
             return {}
     return {}
 
 def save_config(cfg):
     current = load_config()
     current.update(cfg)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(current, f, indent=4)
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(current, f, indent=4)
+    except Exception as e:
+        logging.error(f"Failed to save config: {e}")
 
 # --- CONFIGURATION DEFAULTS ---
 _cfg = load_config()
-HOST = _cfg.get("host", "0.0.0.0")
+HOST = "0.0.0.0"
 PORT = _cfg.get("port", 5000)
 LAN_IP = get_local_ip()
 PUBLIC_URL = _cfg.get("public_url", None)
+TUNNEL_PROVIDER = _cfg.get("tunnel_provider", "serveo")
 TUNNEL_PROC = None
 
 # --- ANSI COLOR HELPERS ---
@@ -53,70 +58,96 @@ Y  = "\033[1;33m"   # Bold Yellow
 C  = "\033[1;36m"   # Bold Cyan
 W  = "\033[0m"      # Reset
 
-# --- UX HELPERS ---
 def copy_to_clipboard(text: str):
-    """Attempt to copy text to clipboard using platform tools."""
+    """Copies text to system clipboard."""
     try:
         if sys.platform == 'linux':
-            # Try xclip first, then xsel
             for cmd in [['xclip', '-selection', 'clipboard'], ['xsel', '-ib']]:
                 try:
                     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     proc.communicate(input=text.encode('utf-8'))
                     if proc.returncode == 0: return True
-                except: continue
+                except Exception: continue
         
-        # Fallback to pyperclip
         import pyperclip
         pyperclip.copy(text)
         return True
-    except:
+    except Exception:
         return False
 
 def open_url(url: str):
-    """Open a URL in the default browser."""
+    """Opens URL in default web browser."""
     try:
         webbrowser.open(url)
         return True
-    except:
+    except Exception:
         return False
 
-# --- AUTO TUNNEL HELPER ---
+def cleanup_tunnel():
+    """Kills background tunnel process group."""
+    global TUNNEL_PROC, PUBLIC_URL
+    if TUNNEL_PROC:
+        try:
+            os.killpg(os.getpgid(TUNNEL_PROC.pid), signal.SIGTERM)
+        except Exception:
+            try: TUNNEL_PROC.terminate()
+            except Exception: pass
+        TUNNEL_PROC = None
+    PUBLIC_URL = None
+    save_config({"public_url": None})
+
+def drain_tunnel_output(pipe):
+    """Logs background tunnel output to file."""
+    try:
+        with pipe:
+            for line in iter(pipe.readline, ''):
+                if line:
+                    logging.info(f"Tunnel: {line.strip()}")
+    except Exception:
+        pass
+
 def start_auto_tunnel():
-    """Starts a Serveo SSH tunnel in the background and captures the URL."""
-    global PUBLIC_URL, TUNNEL_PROC
-    print(f"  {Y}[*]{W} Initializing Global Tunnel (Serveo)...")
+    """Initializes SSH tunnel based on provider choice."""
+    global PUBLIC_URL, TUNNEL_PROC, TUNNEL_PROVIDER
+    cleanup_tunnel()
     
-    # -tt forces pseudo-terminal for consistent output; StrictHostKeyChecking=no avoids prompts
-    cmd = ["ssh", "-tt", "-o", "StrictHostKeyChecking=no", "-R", f"80:localhost:{PORT}", "serveo.net"]
+    print(f"  {Y}[*]{W} Initializing Global Tunnel ({TUNNEL_PROVIDER})...")
+    
+    if TUNNEL_PROVIDER == "localhost.run":
+        cmd = ["ssh", "-n", "-o", "StrictHostKeyChecking=no", "-R", f"80:127.0.0.1:{PORT}", "nokey@localhost.run"]
+        regex = r"https://[a-zA-Z0-9.-]+lhr\.life"
+    else: # serveo
+        cmd = ["ssh", "-n", "-o", "StrictHostKeyChecking=no", "-R", f"80:127.0.0.1:{PORT}", "serveo.net"]
+        regex = r"https://[a-zA-Z0-9.-]+(serveo\.net|serveousercontent\.com)"
     
     try:
-        # Use bufsize=1 for line-buffered output
-        TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        TUNNEL_PROC = subprocess.Popen(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT, 
+            text=True, 
+            bufsize=1,
+            preexec_fn=os.setsid
+        )
         
-        # Wait up to 15 seconds for the URL to appear in the output
         start_time = time.time()
         while time.time() - start_time < 15:
-            line = TUNNEL_PROC.stdout.readline()
-            if not line:
-                time.sleep(0.2)
-                continue
+            if TUNNEL_PROC.poll() is not None: break
             
-            # Robust regex for Serveo's various domains
-            match = re.search(r"https://[a-zA-Z0-9.-]+(serveo\.net|serveousercontent\.com)", line)
-            if match:
-                PUBLIC_URL = match.group(0)
-                save_config({"public_url": PUBLIC_URL})
-                return True
-        
-        # If we reach here, we timed out
-        if TUNNEL_PROC:
-            TUNNEL_PROC.terminate()
+            r, _, _ = select.select([TUNNEL_PROC.stdout], [], [], 0.5)
+            if r:
+                line = TUNNEL_PROC.stdout.readline()
+                if not line: break
+                match = re.search(regex, line)
+                if match:
+                    PUBLIC_URL = match.group(0)
+                    save_config({"public_url": PUBLIC_URL})
+                    threading.Thread(target=drain_tunnel_output, args=(TUNNEL_PROC.stdout,), daemon=True).start()
+                    return True
+        cleanup_tunnel()
         return False
     except Exception as e:
-        if TUNNEL_PROC:
-            TUNNEL_PROC.terminate()
-        print(f"  {R}[!] SSH Error: {e}{W}")
+        logging.error(f"SSH Tunnel Error: {e}")
         return False
 
 # ---------------------------------------------------------------------------
@@ -127,7 +158,7 @@ def clear():
     os.system("clear")
 
 def banner():
-    listener = f"{HOST}:{PORT}" if not PUBLIC_URL else PUBLIC_URL
+    listener = f"{LAN_IP}:{PORT}" if not PUBLIC_URL else PUBLIC_URL
     print(f"""
 {R}    ███╗   ███╗ █████╗ ███████╗██╗  ██╗ ██████╗ ███████╗███╗   ██╗
     ████╗ ████║██╔══██╗██╔════╝██║ ██╔╝██╔════╝ ██╔════╝████╗  ██║
@@ -137,255 +168,203 @@ def banner():
     ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝{W}
     {G}[ Framework Active | Listener: {listener} ]{W}""")
     
-    if not PUBLIC_URL:
-        if ".23." in LAN_IP or ".17." in LAN_IP:
-            print(f"    {R}[!] WSL2 IP detected ({LAN_IP}). Phone may not reach it.{W}")
-        else:
-            print(f"    {Y}[i] Local Mode (LAN only). Use Global Mode for external links.{W}")
+    if PUBLIC_URL:
+        print(f"    {G}[+] Global Mode Active ({TUNNEL_PROVIDER}): {PUBLIC_URL}{W}")
     else:
-        print(f"    {G}[+] Global Mode Active: {PUBLIC_URL}{W}")
+        print(f"    {Y}[i] Local Mode (LAN only). Use Settings to go Global.{W}")
     print()
 
-def display_help():
-    print(f"""
-{R}MASKGEN — USAGE GUIDE{W}
-{'-'*59}
-{C}DESCRIPTION:{W}
-    Advanced URL masking tool exploiting RFC 3986 @-syntax.
-
-{C}COMMANDS:{W}
-    {G}python3 maskgen.py{W}          Launch interactive CLI
-    {G}python3 maskgen.py --help{W}   Display this manual
-    {G}python3 maskgen.py --url URL{W} Use public tunnel URL (saves to config)
-
-{C}INTERACTIVE MENU OPTIONS:{W}
-    {Y}1. Create Masked URL{W}   →  Enter target + mask, get @-URL
-    {Y}2. View Analytics{W}      →  List all links & pick one to Copy/Open
-    {Y}3. Settings{W}            →  Change HOST/PORT or PUBLIC_URL
-    {Y}4. Delete a Link{W}       →  Remove a link by ID
-    {Y}5. Exit{W}
-{'-'*59}
-""")
-
-def main_menu() -> str:
-    banner()
-    print(f"    {Y}1.{W} Create Masked URL")
-    print(f"    {Y}2.{W} View Analytics / Manage Links")
-    print(f"    {Y}3.{W} Settings")
-    print(f"    {Y}4.{W} Delete a Link")
-    print(f"    {Y}5.{W} Exit\n")
-    return input(f"{G}raptor @maskgen.db{W}:~$ ").strip()
-
 # ---------------------------------------------------------------------------
-# FEATURE: SETTINGS
+# MENU FEATURES
 # ---------------------------------------------------------------------------
 
 def manage_settings():
-    global HOST, PORT, PUBLIC_URL
+    global PUBLIC_URL, TUNNEL_PROVIDER
     clear()
     banner()
-    print(f"{C}[ Settings — Persistent ]{W}\n")
-    print(f"  {Y}1.{W} Change Host (Current: {HOST})")
-    print(f"  {Y}2.{W} Change Port (Current: {PORT})")
-    print(f"  {Y}3.{W} Public Tunnel URL (Current: {PUBLIC_URL or 'None'})")
-    print(f"  {Y}4.{W} Back to Menu\n")
+    print(f"{C}[ Settings & Maintenance ]{W}\n")
+    print(f"  {Y}1.{W} Reset/Start Global Tunnel")
+    print(f"  {Y}2.{W} Stop Global Tunnel (Back to LAN)")
+    print(f"  {Y}3.{W} Switch Provider (Current: {TUNNEL_PROVIDER})")
+    print(f"  {Y}4.{W} View Server Logs (server.log)")
+    print(f"  {Y}5.{W} Back to Menu\n")
     
     choice = input(f"{G}Settings{W}: ").strip()
     if choice == "1":
-        HOST = input(f"  {Y}New Host{W}: ").strip() or HOST
+        if start_auto_tunnel():
+            print(f"  {G}[+] Tunnel Active: {PUBLIC_URL}{W}")
+        else:
+            print(f"  {R}[!] Tunnel Failed. See server.log{W}")
     elif choice == "2":
-        raw = input(f"  {Y}New Port{W}: ").strip()
-        if raw.isdigit(): PORT = int(raw)
+        cleanup_tunnel()
+        print(f"  {G}[+] Tunnel stopped.{W}")
     elif choice == "3":
-        PUBLIC_URL = input(f"  {Y}New Tunnel URL{W} (or 'none'): ").strip()
-        if PUBLIC_URL.lower() == 'none': PUBLIC_URL = None
-    else:
-        return
-
-    save_config({"host": HOST, "port": PORT, "public_url": PUBLIC_URL})
-    print(f"\n  {G}[+] Settings saved.{W}")
-    input("  Press Enter to continue...")
-
-# ---------------------------------------------------------------------------
-# FEATURE: CREATE MASKED URL
-# ---------------------------------------------------------------------------
+        print(f"\n  {Y}[ Tunnel Providers ]{W}")
+        print(f"    1. Serveo (serveo.net)")
+        print(f"    2. Localhost.run (lhr.life)")
+        p_choice = input(f"\n  Choice [1/2]: ").strip()
+        TUNNEL_PROVIDER = "localhost.run" if p_choice == "2" else "serveo"
+        save_config({"tunnel_provider": TUNNEL_PROVIDER})
+        print(f"  {G}[+] Switched to {TUNNEL_PROVIDER}.{W}")
+        if PUBLIC_URL: start_auto_tunnel()
+    elif choice == "4":
+        if os.path.exists("server.log"): os.system("tail -n 30 server.log")
+        else: print("  [!] No logs found.")
+    else: return
+    input("\n  Press Enter to continue...")
 
 def create_masked_url():
-    global PUBLIC_URL
     clear()
     banner()
     print(f"{C}[ Create Masked URL ]{W}\n")
 
-    while True:
+    target = ""
+    while not is_valid_url(target):
         target = input(f"  {Y}Target URL{W}: ").strip()
-        if is_valid_url(target): break
-        print(f"  {R}[!] Invalid URL (must start with http/https){W}")
+        if not is_valid_url(target):
+            print(f"  {R}[!] Invalid URL (must include http/https).{W}")
 
-    mask = input(f"  {Y}Mask Domain{W}: ").strip().replace("http://", "").replace("https://", "").rstrip("/") or "google.com"
+    mask = input(f"  {Y}Mask Domain{W} (e.g. google.com): ").strip()
+    mask = mask.replace("http://", "").replace("https://", "").rstrip("/") or "google.com"
 
-    # --- UX IMPROVEMENT: Auto-Global Option ---
-    if not PUBLIC_URL:
-        go_global = input(f"  {Y}Make this link Global (Works everywhere)?{W} [y/N]: ").strip().lower()
-        if go_global == 'y':
-            if not start_auto_tunnel():
-                print(f"  {R}[!] Failed to initialize tunnel. Falling back to LAN mode.{W}")
-            else:
-                print(f"  {G}[+] Global Mode Active: {PUBLIC_URL}{W}")
-
-    # Generate unique code
-    for _ in range(5):
-        code = generate_code(length=7)
-        link_id = database.save_link(mask, target, code)
-        if link_id: break
-    else:
-        print(f"\n  {R}[!] DB Error generating code.{W}")
-        return
-
-    # Generate URLs
+    use_global = False
     if PUBLIC_URL:
-        scheme = "https://" if PUBLIC_URL.startswith("https") else "http://"
-        base = PUBLIC_URL.replace("http://", "").replace("https://", "").rstrip("/")
-        masked_url = f"{scheme}{mask}@{base}/{code}"
+        print(f"\n  {Y}[ Connection Mode ]{W}")
+        print(f"    {G}1.{W} Global Mode ({PUBLIC_URL})")
+        print(f"    {G}2.{W} Local Mode  ({LAN_IP}:{PORT})")
+        m_choice = input(f"\n  Choice [1/2]: ").strip()
+        use_global = (m_choice != "2")
     else:
-        masked_url = f"http://{mask}@{LAN_IP if LAN_IP != '127.0.0.1' else '127.0.0.1'}:{PORT}/{code}"
+        go_global = input(f"\n  {Y}Make this link Global?{W} [y/N]: ").strip().lower()
+        if go_global == 'y':
+            if start_auto_tunnel():
+                use_global = True
+            else:
+                print(f"  {R}[!] Tunnel failed. Using Local.{W}")
 
-    print(f"\n  {G}[+] Masked URL Generated:{W}")
-    print(f"      {B}{masked_url}{W}\n")
+    code = generate_code(7)
+    while database.save_link(mask, target, code) is None:
+        code = generate_code(7)
+
+    if use_global and PUBLIC_URL:
+        base = PUBLIC_URL.replace("https://", "").replace("http://", "").rstrip("/")
+        masked_url = f"https://{mask}@{base}/{code}"
+        clean_url = f"https://{base}/{code}"
+    else:
+        host = LAN_IP if LAN_IP != "127.0.0.1" else "127.0.0.1"
+        masked_url = f"http://{mask}@{host}:{PORT}/{code}"
+        clean_url = f"http://{host}:{PORT}/{code}"
+
+    print(f"\n  {G}[+] URLs Generated:{W}")
+    print(f"      {C}Masked:{W} {B}{masked_url}{W}")
+    print(f"      {C}Clean: {W} {clean_url}\n")
     
-    # Auto-copy
-    if copy_to_clipboard(masked_url):
-        print(f"  {C}[i] Link copied to clipboard automatically.{W}")
+    to_copy = clean_url if use_global else masked_url
+    if copy_to_clipboard(to_copy):
+        print(f"  {C}[i] Link copied to clipboard.{W}")
 
-    print(f"\n  {Y}[Actions]{W}")
-    print(f"    [O] Open in Browser  |  [Enter] Back to Menu")
-    
-    action = input(f"\n  Choice: ").strip().lower()
-    if action == 'o':
-        open_url(masked_url)
-
-# ---------------------------------------------------------------------------
-# FEATURE: VIEW ANALYTICS
-# ---------------------------------------------------------------------------
+    print(f"  {Y}[Actions]{W} [O] Open Clean | [M] Open Masked | [Enter] Menu")
+    act = input(f"  Choice: ").strip().lower()
+    if act == 'o': open_url(clean_url)
+    elif act == 'm': open_url(masked_url)
 
 def view_analytics():
     while True:
         clear()
         banner()
-        print(f"{C}[ Analytics — All Links ]{W}\n")
-
+        print(f"{C}[ Analytics Dashboard ]{W}\n")
         links = database.get_all_links()
         if not links:
-            print(f"  {Y}[i] No links found.{W}")
-            input(f"\n  Press Enter to continue...")
-            return
+            print("  [i] No links found."); input("\n  Enter..."); return
 
-        col = {"id": 3, "mask": 20, "code": 9, "clicks": 6, "last": 19}
-        header = (f"  {Y}{'ID':<{col['id']}} │ {'Mask':<{col['mask']}} │ "
-                  f"{'Code':<{col['code']}} │ {'Hits':<{col['clicks']}} │ {'Last Hit':<{col['last']}}{W}")
-        print(header)
-        print(f"  {'─'*col['id']}─┼─{'─'*col['mask']}─┼─{'─'*col['code']}─┼─{'─'*col['clicks']}─┼─{'─'*col['last']}─")
+        print(f"  {Y}{'ID':<3} │ {'Mask':<20} │ {'Hits':<6} │ {'Last Hit'}{W}")
+        print(f"  {'─'*3}─┼─{'─'*20}─┼─{'─'*6}─┼─{'─'*19}")
+        for r in links:
+            print(f"  {r['id']:<3} │ {r['mask_text'][:20]:<20} │ {G}{r['clicks']:<6}{W} │ {r['last_accessed'] or '—'}")
 
-        for row in links:
-            print(f"  {row['id']:<{col['id']}} │ {row['mask_text'][:col['mask']]:<{col['mask']}} │ "
-                  f"{row['redirect_code']:<{col['code']}} │ {G}{row['clicks']:<{col['clicks']}}{W} │ "
-                  f"{row['last_accessed'] or '—':<{col['last']}}")
-
-        print(f"\n  {Y}[Manage ID]{W} Enter ID to [C]opy or [O]pen link | [Enter] Back")
-        raw = input(f"\n  ID: ").strip().lower()
-        if not raw: break
+        print(f"\n  {Y}[ID + Action]{W} e.g. '1c' to Copy, '1o' to Open | [Enter] Back")
+        cmd = input(f"  Action: ").strip().lower()
+        if not cmd: break
         
-        target_id = "".join(filter(str.isdigit, raw))
-        if not target_id: continue
-        
+        target_id = "".join(filter(str.isdigit, cmd))
         row = next((r for r in links if str(r["id"]) == target_id), None)
         if not row: continue
 
-        # Reconstruct URL
         if PUBLIC_URL:
-            scheme = "https://" if PUBLIC_URL.startswith("https") else "http://"
-            base = PUBLIC_URL.replace("http://", "").replace("https://", "").rstrip("/")
-            link = f"{scheme}{row['mask_text']}@{base}/{row['redirect_code']}"
+            base = PUBLIC_URL.replace("https://", "").replace("http://", "").rstrip("/")
+            link = f"https://{row['mask_text']}@{base}/{row['redirect_code']}"
         else:
             link = f"http://{row['mask_text']}@{LAN_IP}:{PORT}/{row['redirect_code']}"
 
-        if 'o' in raw:
-            open_url(link)
-            print(f"  {G}[+] Opened ID {target_id}.{W}")
-            time.sleep(1)
-        elif 'c' in raw or True: 
-            if copy_to_clipboard(link):
-                print(f"  {G}[+] Copied ID {target_id} to clipboard.{W}")
-                time.sleep(1)
+        if 'o' in cmd: open_url(link)
+        else:
+            if copy_to_clipboard(link): print(f"  {G}[+] Copied.{W}"); time.sleep(0.5)
 
-# ---------------------------------------------------------------------------
-# FEATURE: DELETE A LINK
-# ---------------------------------------------------------------------------
-
-def delete_link():
+def delete_links():
     clear()
     banner()
-    print(f"{C}[ Delete a Link ]{W}\n")
+    print(f"{C}[ Delete Links ]{W}\n")
     links = database.get_all_links()
-    if not links: return
+    if not links:
+        print("  [i] No links found."); time.sleep(1); return
 
     for row in links:
         print(f"  {Y}[{row['id']}]{W} {row['mask_text'][:30]}  →  {row['redirect_code']}")
 
-    raw = input(f"\n  ID to delete (or Enter): ").strip()
-    if raw.isdigit() and database.delete_link(int(raw)):
-        print(f"\n  {G}[+] Deleted.{W}")
-        time.sleep(1)
+    print(f"\n  {Y}[Options]{W} IDs (e.g. '1,2'), 'all' to clear, or [Enter] to cancel")
+    raw = input(f"  Choice: ").strip().lower()
+    if not raw: return
 
-# ---------------------------------------------------------------------------
-# ENTRY POINT
-# ---------------------------------------------------------------------------
+    if raw == "all":
+        confirm = input(f"  {R}[!] Delete ALL links? (y/N): {W}").strip().lower()
+        if confirm == 'y':
+            for r in links: database.delete_link(r['id'])
+            print(f"  {G}[+] Database cleared.{W}")
+            time.sleep(1)
+        return
+
+    ids = [i.strip() for i in raw.replace(",", " ").split() if i.strip().isdigit()]
+    if not ids: return
+
+    count = 0
+    for tid in ids:
+        if database.delete_link(int(tid)): count += 1
+    
+    print(f"  {G}[+] Deleted {count} link(s).{W}")
+    time.sleep(1)
 
 def main():
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--help", "-h", action="store_true")
-    parser.add_argument("--url", type=str)
-    args = parser.parse_args()
-
-    if args.help:
-        display_help()
-        sys.exit(0)
-
-    global PUBLIC_URL
-    if args.url:
-        PUBLIC_URL = args.url
-        save_config({"public_url": PUBLIC_URL})
-
     database.init_db()
 
-    # Background Server
-    server_thread = threading.Thread(
-        target=redirect_server.run_server,
-        kwargs={"host": HOST, "port": PORT},
-        daemon=True
-    )
+    # Server Thread
+    server_thread = threading.Thread(target=redirect_server.run_server, kwargs={"host": "0.0.0.0", "port": 5000}, daemon=True)
     server_thread.start()
 
-    # Wait for server
-    for _ in range(50):
+    # Availability Check
+    for _ in range(30):
         try:
-            with socket.create_connection((HOST if HOST != "0.0.0.0" else "127.0.0.1", PORT), timeout=0.1):
-                break
-        except: time.sleep(0.1)
+            with socket.create_connection(("127.0.0.1", 5000), timeout=0.1): break
+        except Exception: time.sleep(0.1)
 
     try:
         while True:
             clear()
-            choice = main_menu()
-            if choice == "1": create_masked_url()
-            elif choice == "2": view_analytics()
-            elif choice == "3": manage_settings()
-            elif choice == "4": delete_link()
-            elif choice == "5": break
+            banner()
+            print(f"    {Y}1.{W} Create Masked URL")
+            print(f"    {Y}2.{W} View Analytics / Manage Links")
+            print(f"    {Y}3.{W} Settings / Maintenance")
+            print(f"    {Y}4.{W} Delete Links")
+            print(f"    {Y}5.{W} Exit\n")
+            c = input(f"{G}raptor{W}:~$ ").strip()
+            
+            if c == "1": create_masked_url()
+            elif c == "2": view_analytics()
+            elif c == "3": manage_settings()
+            elif c == "4": delete_links()
+            elif c == "5": break
     finally:
-        # Clean up tunnel on exit
-        if TUNNEL_PROC:
-            TUNNEL_PROC.terminate()
+        cleanup_tunnel()
 
 if __name__ == "__main__":
     try: main()
-    except KeyboardInterrupt: sys.exit(0)
+    except KeyboardInterrupt: cleanup_tunnel(); sys.exit(0)

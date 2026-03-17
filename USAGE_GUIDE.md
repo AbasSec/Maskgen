@@ -1,58 +1,57 @@
-# MASKGEN Usage Guide
+# MASKGEN Technical Usage Guide
 
-MASKGEN is an advanced URL masking tool designed for security researchers and authorized testing. This guide explains how to use the tool and defines key networking concepts involved.
+MASKGEN is a sophisticated URL masking framework designed for security researchers. Version 2.5 introduces significant stability and user experience enhancements.
 
-## 🚀 How to Use MASKGEN
+## 🚀 Interactive Menu Structure
 
-### 1. Launching the Tool
-Start the interactive CLI by running:
-```bash
-python3 maskgen.py
-```
-
-### 2. Global Access (Tunnels)
-If you are on a private network (like Home Wi-Fi or WSL2), external devices cannot reach your machine directly. To use the tool globally, you must use a **Tunneling Service**.
-
-**Using Serveo (Recommended):**
-1. Open a new terminal and run:
-   ```bash
-   ssh -R 80:localhost:5000 serveo.net
-   ```
-2. Copy the URL provided (e.g., `https://xyz.serveo.net`).
-3. Launch MASKGEN with that URL:
-   ```bash
-   python3 maskgen.py --url https://xyz.serveo.net
-   ```
+1.  **Create Masked URL:** The core engine. Generates your links.
+2.  **View Analytics / Manage Links:** Interactive dashboard. Type an ID to Copy (`1c`) or Open (`1o`).
+3.  **Settings / Maintenance:** Manage persistent config, switch tunnel providers, or view live logs.
+4.  **Delete Links:** Clean up your database. Supports single ID, Bulk (`1, 2, 5`), or `all`.
+5.  **Exit:** Gracefully closes the server and kills active tunnels.
 
 ---
 
-## 📘 Glossary of Terms
+## 🌐 Global Access & Tunneling
 
-### Localhost (127.0.0.1)
-**What it is:** A reserved IP address that refers to "this computer."
-**What it does:** When you access `localhost`, your computer talks to itself without sending data over the network. MASKGEN uses this for its internal redirect server.
-**Restriction:** A URL containing `localhost` will **not** work on your phone or any other device; it only works on the machine running the code.
+If you are not on a public VPS, your local machine is invisible to the internet. MASKGEN automates the use of **SSH Tunnels** to bridge this gap.
 
-### Tunneling (e.g., Serveo / ngrok)
-**What it is:** A way to expose a local server (like MASKGEN) to the public internet.
-**What it does:** It creates a "bridge" between a public URL and your local machine. This allows a person on the other side of the world to scan your QR or click your link and still reach your computer.
+### Automated Providers:
+*   **Serveo (serveo.net):** Standard reliable tunneling.
+*   **Localhost.run (lhr.life):** Alternative provider with different domain names to bypass filters.
 
-### Telnet (Network Testing)
-**What it is:** An old but powerful network protocol used to communicate with a remote server.
-**What it does:** In modern security testing, `telnet` is often used to check if a specific port (like 5000) is open and accepting connections.
-**How to get it:**
-*   **Linux/macOS:** `sudo apt install telnet` or `brew install telnet`.
-*   **Windows:** Enable "Telnet Client" in "Windows Features."
-**Example Test:** `telnet 127.0.0.1 5000` — if it connects, the MASKGEN server is healthy.
+**Switching:** Go to **Option 3 -> 3** to toggle between providers. The tool will automatically restart your tunnel and update your public URL.
+
+---
+
+## 🛠 Features & Explanations
 
 ### RFC 3986 (The @ Mask)
-**What it is:** The official technical standard for URIs (Uniform Resource Identifiers).
-**What it does:** It allows the use of an `@` symbol to separate user credentials from the actual host. MASKGEN "exploits" this by putting a fake domain (the mask) in the credential section, which many users mistake for the real destination.
-**Example:** `http://google.com@your-ip.com/abc`
-*   `google.com` is treated as a username (the mask).
-*   `your-ip.com` is the actual destination server.
+The tool uses the "Userinfo" subcomponent of a URI. Browsers treat anything before the `@` as metadata (username) and connect to the host after the `@`.
+*   **Example:** `https://bank.com@xyz.lhr.life/abc`
+*   **Reality:** Connects to `xyz.lhr.life`.
+
+### Actionable Analytics
+The dashboard is no longer just for viewing.
+*   **Copying:** Enter the ID (e.g., `5`) to immediately copy that link to your clipboard.
+*   **Opening:** Enter ID + `o` (e.g., `5o`) to open it in your default browser.
+
+### Bulk Deletion
+Management is faster. You can enter `1 2 3` to delete those specific links or `all` to clear the entire database.
+
+### Diagnostic Logging
+All background activity (Server hits, SSH errors) is saved to `server.log`. You can view the last 30 lines directly in the app via **Option 3 -> 4**.
+
+---
+
+## 📘 Glossary
+
+*   **Localhost (127.0.0.1):** This machine. Links using this address will NOT work on other devices.
+*   **0.0.0.0:** A directive telling the server to "listen on every possible network interface."
+*   **SSH Tunnel:** A secure pipe that forwards a public port to your local computer.
+*   **Telnet:** A utility used to test if a port (like 5000) is actually open and accepting data.
 
 ---
 
 ## ⚖️ Legal Disclaimer
-This tool is for **authorized security research and CTF purposes only**. Using MASKGEN to perform unauthorized phishing or social engineering attacks is illegal and unethical.
+Unauthorized use of this tool for phishing or social engineering is illegal. This is for **authorized security testing only**.

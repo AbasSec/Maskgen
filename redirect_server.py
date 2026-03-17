@@ -1,7 +1,5 @@
 """
 redirect_server.py — MASKGEN threaded Flask redirect server.
-Handles all incoming /<code> requests, logs clicks via database.py,
-and issues HTTP 302 redirects to the stored target URL.
 """
 
 import logging
@@ -9,35 +7,53 @@ import os
 from flask import Flask, redirect
 import database
 
-# --- Silence ALL Flask / Werkzeug output so nothing bleeds into the CLI ---
-# Level CRITICAL means only fatal internal errors surface (practically nothing)
-logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
-logging.getLogger("werkzeug").propagate = False
-
-_devnull = open(os.devnull, "w")
+# Configure logging to a file
+logging.basicConfig(
+    filename='server.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 app = Flask(__name__)
 
-# Silence Flask's own internal logger too
-app.logger.setLevel(logging.CRITICAL)
-app.logger.propagate = False
-
+# Silence Werkzeug console output
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 @app.route("/<code>")
 def handle_redirect(code: str):
     """
     Look up redirect_code in the database.
-    On hit  → increment click counter and 302 to target.
-    On miss → return a plain 404 with a short message.
     """
+    logging.info(f"Incoming request for code: {code}")
     target = database.get_target(code)
+    
     if target:
-        return redirect(target, code=302)
+        # Security: Prevent malicious non-HTTP schemes (like javascript:)
+        # We only allow http:// or https://
+        clean_target = target.strip()
+        if not clean_target.lower().startswith(("http://", "https://")):
+            # If no scheme, default to http
+            clean_target = "http://" + clean_target
+        
+        # Final safety check
+        if not clean_target.lower().startswith(("http://", "https://")):
+            logging.error(f"Dangerous target detected and blocked: {target}")
+            return "Security violation: Invalid URL scheme.", 400
+
+        logging.info(f"Redirecting to: {clean_target}")
+        return redirect(clean_target, code=302)
+    
+    logging.warning(f"No match for code: {code}")
     return "Invalid or expired link.", 404
 
+@app.route("/health")
+def health_check():
+    return "OK", 200
 
-def run_server(host: str = "127.0.0.1", port: int = 5000):
-    """Start the Flask server. Called from maskgen.py in a daemon thread."""
+def run_server(host: str = "0.0.0.0", port: int = 5000):
+    """Start the Flask server."""
+    logging.info(f"Starting server on {host}:{port}")
     app.run(
         host=host,
         port=port,
@@ -45,9 +61,6 @@ def run_server(host: str = "127.0.0.1", port: int = 5000):
         use_reloader=False,
     )
 
-
 if __name__ == "__main__":
-    # Allow direct invocation for testing: python3 redirect_server.py
     database.init_db()
-    print(f"[!] Starting standalone redirect server on http://127.0.0.1:5000")
     run_server()

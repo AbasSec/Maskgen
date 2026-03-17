@@ -6,6 +6,7 @@ Handles all database operations: init, save, lookup, and analytics.
 import sqlite3
 import threading
 from datetime import datetime
+from contextlib import contextmanager
 
 DB_NAME = "maskgen.db"
 
@@ -13,18 +14,22 @@ DB_NAME = "maskgen.db"
 _db_lock = threading.Lock()
 
 
-def _connect():
-    """Open a WAL-mode connection with row_factory for named column access."""
+@contextmanager
+def _get_connection():
+    """Context manager that ensures the connection is closed."""
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
-    """Initialize the database schema. Safe to call multiple times (IF NOT EXISTS)."""
+    """Initialize the database schema."""
     with _db_lock:
-        with _connect() as conn:
+        with _get_connection() as conn:
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS links (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,11 +47,11 @@ def init_db():
 def save_link(mask: str, target: str, code: str) -> int | None:
     """
     Persist a new masked link.
-    Returns the numeric ID on success, None on redirect_code collision (caller retries).
+    Returns the numeric ID on success, None on redirect_code collision.
     """
     with _db_lock:
         try:
-            with _connect() as conn:
+            with _get_connection() as conn:
                 cursor = conn.execute(
                     "INSERT INTO links (mask_text, target_url, redirect_code, created_at) "
                     "VALUES (?, ?, ?, ?)",
@@ -61,10 +66,10 @@ def save_link(mask: str, target: str, code: str) -> int | None:
 def get_target(code: str):
     """
     Look up a redirect code and atomically increment its click counter.
-    Also stamps last_accessed timestamp. Returns target URL or None.
+    Returns target URL or None.
     """
     with _db_lock:
-        with _connect() as conn:
+        with _get_connection() as conn:
             row = conn.execute(
                 "SELECT target_url FROM links WHERE redirect_code = ?", (code,)
             ).fetchone()
@@ -82,18 +87,20 @@ def get_target(code: str):
 def get_all_links() -> list:
     """Return all link rows ordered by creation time."""
     with _db_lock:
-        with _connect() as conn:
-            return conn.execute(
+        with _get_connection() as conn:
+            # Convert rows to dicts so they can be used after connection is closed
+            rows = conn.execute(
                 "SELECT id, mask_text, target_url, redirect_code, "
                 "created_at, clicks, last_accessed "
                 "FROM links ORDER BY id ASC"
             ).fetchall()
+            return [dict(row) for row in rows]
 
 
 def delete_link(link_id: int) -> bool:
     """Delete a link by numeric ID. Returns True if a row was removed."""
     with _db_lock:
-        with _connect() as conn:
+        with _get_connection() as conn:
             cursor = conn.execute("DELETE FROM links WHERE id = ?", (link_id,))
             conn.commit()
             return cursor.rowcount > 0
