@@ -316,10 +316,10 @@ def delete_links():
     if not raw: return
 
     if raw == "all":
-        confirm = input(f"  {R}[!] Delete ALL links? (y/N): {W}").strip().lower()
+        confirm = input(f"  {R}[!] Delete ALL links and reset counter? (y/N): {W}").strip().lower()
         if confirm == 'y':
-            for r in links: database.delete_link(r['id'])
-            print(f"  {G}[+] Database cleared.{W}")
+            database.clear_db()
+            print(f"  {G}[+] Database cleared and ID counter reset.{W}")
             time.sleep(1)
         return
 

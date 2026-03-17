@@ -104,3 +104,13 @@ def delete_link(link_id: int) -> bool:
             cursor = conn.execute("DELETE FROM links WHERE id = ?", (link_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+
+def clear_db():
+    """Wipe the database and reset the ID counter to 1."""
+    with _db_lock:
+        with _get_connection() as conn:
+            conn.execute("DELETE FROM links")
+            # Reset SQLite's internal autoincrement counter
+            conn.execute("DELETE FROM sqlite_sequence WHERE name='links'")
+            conn.commit()
