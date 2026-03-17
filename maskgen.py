@@ -87,25 +87,35 @@ def start_auto_tunnel():
     global PUBLIC_URL, TUNNEL_PROC
     print(f"  {Y}[*]{W} Initializing Global Tunnel (Serveo)...")
     
-    # -o StrictHostKeyChecking=no avoids hanging on host verification
-    cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-R", f"80:localhost:{PORT}", "serveo.net"]
+    # -tt forces pseudo-terminal for consistent output; StrictHostKeyChecking=no avoids prompts
+    cmd = ["ssh", "-tt", "-o", "StrictHostKeyChecking=no", "-R", f"80:localhost:{PORT}", "serveo.net"]
     
     try:
-        TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        # Use bufsize=1 for line-buffered output
+        TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         
-        # We need to read the output to find the assigned URL
-        for _ in range(20): # Timeout after 20 lines/seconds
+        # Wait up to 15 seconds for the URL to appear in the output
+        start_time = time.time()
+        while time.time() - start_time < 15:
             line = TUNNEL_PROC.stdout.readline()
-            if not line: break
+            if not line:
+                time.sleep(0.2)
+                continue
             
-            # Look for something like https://random.serveo.net
-            match = re.search(r"https://[a-zA-Z0-9.-]+serveo\.net", line)
+            # Robust regex for Serveo's various domains
+            match = re.search(r"https://[a-zA-Z0-9.-]+(serveo\.net|serveousercontent\.com)", line)
             if match:
                 PUBLIC_URL = match.group(0)
                 save_config({"public_url": PUBLIC_URL})
                 return True
+        
+        # If we reach here, we timed out
+        if TUNNEL_PROC:
+            TUNNEL_PROC.terminate()
         return False
     except Exception as e:
+        if TUNNEL_PROC:
+            TUNNEL_PROC.terminate()
         print(f"  {R}[!] SSH Error: {e}{W}")
         return False
 
