@@ -6,13 +6,7 @@ URL validation, cryptographically-safe code generation, and optional QR output.
 import re
 import secrets
 import string
-
-# Optional dependency — qrcode is listed in requirements.txt
-try:
-    import qrcode as _qrcode
-    QR_AVAILABLE = True
-except ImportError:
-    QR_AVAILABLE = False
+import socket as _socket
 
 # Alphabet for redirect codes (no ambiguous chars: 0/O, l/1/I)
 _CODE_ALPHABET = (
@@ -49,13 +43,17 @@ def is_valid_url(url: str) -> bool:
     return bool(pattern.match(url.strip()))
 
 
-def make_qr(data: str, filename: str) -> str | None:
+def get_local_ip() -> str:
     """
-    Generate a QR code PNG for the given data string.
-    Returns the saved filename, or None if qrcode is not installed.
+    Attempt to find the primary LAN IP address of the machine.
+    Returns 127.0.0.1 if it cannot determine an external-facing IP.
     """
-    if not QR_AVAILABLE:
-        return None
-    qr = _qrcode.make(data)
-    qr.save(filename)
-    return filename
+    try:
+        # We don't actually send data; we just trigger OS routing logic.
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"

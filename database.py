@@ -39,23 +39,23 @@ def init_db():
             conn.commit()
 
 
-def save_link(mask: str, target: str, code: str) -> bool:
+def save_link(mask: str, target: str, code: str) -> int | None:
     """
     Persist a new masked link.
-    Returns True on success, False on redirect_code collision (caller retries).
+    Returns the numeric ID on success, None on redirect_code collision (caller retries).
     """
     with _db_lock:
         try:
             with _connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     "INSERT INTO links (mask_text, target_url, redirect_code, created_at) "
                     "VALUES (?, ?, ?, ?)",
                     (mask, target, code, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 )
                 conn.commit()
-            return True
+                return cursor.lastrowid
         except sqlite3.IntegrityError:
-            return False
+            return None
 
 
 def get_target(code: str):
